@@ -6279,6 +6279,7 @@ def main():
 
   if _cpplint_state.output_format == 'junit':
     sys.stderr.write(_cpplint_state.FormatJUnitXML())
+    sys.exit(0)
 
   sys.exit(_cpplint_state.error_count > 0)
 
