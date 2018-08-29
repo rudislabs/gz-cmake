@@ -54,7 +54,8 @@ import unicodedata
 
 
 _USAGE = """
-Syntax: cpplint.py [--verbose=#] [--output=vs7] [--filter=-x,+y,...]
+Syntax: cpplint.py [--verbose=#] [--output=emacs|eclipse|vs7|junit]
+                   [--filter=-x,+y,...]
                    [--counting=total|toplevel|detailed] [--root=subdir]
                    [--linelength=digits] [--headers=x,y,...]
                    [--quiet]
@@ -77,9 +78,11 @@ Syntax: cpplint.py [--verbose=#] [--output=vs7] [--filter=-x,+y,...]
 
   Flags:
 
-    output=vs7
-      By default, the output is formatted to ease emacs parsing.  Visual Studio
-      compatible output (vs7) may also be used.  Other formats are unsupported.
+    output=emacs|eclipse|vs7|junit
+      By default, the output is formatted to ease emacs parsing.  Output
+      compatible with eclipse (eclipse), Visual Studio (vs7), and JUnit
+      XML parsers such as those used in Jenkins and Bamboo may also be
+      used.  Other formats are unsupported.
 
     verbose=#
       Specify a number 0-5 to restrict errors to certain verbosity levels.
@@ -881,8 +884,15 @@ class _CppLintState(object):
 
     # output format:
     # "emacs" - format that emacs can parse (default)
+    # "eclipse" - format that eclipse can parse
     # "vs7" - format that Microsoft Visual Studio 7 can parse
+    # "junit" - format that Jenkins, Bamboo, etc can parse
     self.output_format = 'emacs'
+
+    # For JUnit output, save errors and failures until the end so that they
+    # can be written into the XML
+    self._junit_errors = []
+    self._junit_failures = []
 
   def SetOutputFormat(self, output_format):
     """Sets the output format for errors."""
@@ -959,9 +969,51 @@ class _CppLintState(object):
   def PrintErrorCounts(self):
     """Print a summary of errors by category, and the total."""
     for category, count in self.errors_by_category.iteritems():
-      sys.stderr.write('Category \'%s\' errors found: %d\n' %
+      self.PrintInfo('Category \'%s\' errors found: %d\n' %
                        (category, count))
-    sys.stdout.write('Total errors found: %d\n' % self.error_count)
+    self.PrintInfo('Total errors found: %d\n' % self.error_count)
+
+  def PrintInfo(self, message):
+    if self.output_format != 'junit':
+      sys.stderr.write(message)
+
+  def PrintError(self, message):
+    if self.output_format == 'junit':
+      self._junit_errors.append(message)
+    else:
+      sys.stderr.write(message)
+
+  def AddJUnitFailure(self, filename, linenum, message):
+      self._junit_failures.append((filename, linenum, message))
+
+  def FormatJUnitXML(self):
+    num_errors = len(self._junit_errors)
+    num_failures = len(self._junit_failures)
+    if num_errors == 0 and num_failures == 0:
+      num_tests = 1
+      body = '<testcase name="passed" />'
+    else:
+      num_tests = num_errors + num_failures
+      body = ''
+      if len(self._junit_errors) > 0:
+        template = '<testcase name="error"><error>{0}</error></testcase>'
+        body += template.format('\n'.join(self._junit_errors))
+      failed_file_order = []
+      failures_by_file = {}
+      for failure in self._junit_failures:
+        failed_file = failure[0]
+        if failed_file not in failed_file_order:
+          failed_file_order.append(failed_file)
+          failures_by_file[failed_file] = []
+        failures_by_file[failed_file].append(failure)
+      for failed_file in failed_file_order:
+        failures = failures_by_file[failed_file]
+        text = '\n'.join(['{0}: {1}'.format(f[1], f[2]) for f in failures])
+        template = '<testcase name="{0}"><failure>{1}</failure></testcase>'
+        body += template.format(failed_file, text)
+    return ('<?xml version="1.0" encoding="UTF-8" ?>\n'
+        '<testsuite name="cpplint" errors="{0}" failures="{1}" tests="{2}">'
+        '{3}</testsuite>').format(num_errors, num_failures, num_tests, body)
 
 _cpplint_state = _CppLintState()
 
@@ -1244,11 +1296,13 @@ def Error(filename, linenum, category, confidence, message):
   if _ShouldPrintError(category, confidence, linenum):
     _cpplint_state.IncrementErrorCount(category)
     if _cpplint_state.output_format == 'vs7':
-      sys.stderr.write('%s(%s): error cpplint: [%s] %s [%d]\n' % (
+      _cpplint_state.PrintError('%s(%s):  %s  [%s] [%d]\n' % (
           filename, linenum, category, message, confidence))
     elif _cpplint_state.output_format == 'eclipse':
       sys.stderr.write('%s:%s: warning: %s  [%s] [%d]\n' % (
           filename, linenum, message, category, confidence))
+    elif _cpplint_state.output_format == 'junit':
+        _cpplint_state.AddJUnitFailure(filename, linenum, message)
     else:
       sys.stderr.write('%s:%s:  %s  [%s] [%d]\n' % (
           filename, linenum, message, category, confidence))
@@ -5978,17 +6032,16 @@ def ProcessConfigOverrides(filename):
                 if _cpplint_state.quiet:
                   # Suppress "Ignoring file" warning when using --quiet.
                   return False
-                sys.stderr.write('Ignoring "%s": file excluded by "%s". '
-                                 'File path component "%s" matches '
-                                 'pattern "%s"\n' %
-                                 (filename, cfg_file, base_name, val))
+                _cpplint_state.PrintError('Ignoring "%s": file excluded by '
+                    '"%s". File path component "%s" matches pattern "%s"\n' %
+                    (filename, cfg_file, base_name, val))
                 return False
           elif name == 'linelength':
             global _line_length
             try:
                 _line_length = int(val)
             except ValueError:
-                sys.stderr.write('Line length must be numeric.')
+                _cpplint_state.PrintError('Line length must be numeric.')
           elif name == 'root':
             global _root
             # root directories are specified relative to CPPLINT.cfg dir.
@@ -5996,12 +6049,12 @@ def ProcessConfigOverrides(filename):
           elif name == 'headers':
             ProcessHppHeadersOption(val)
           else:
-            sys.stderr.write(
+            _cpplint_state.PrintError(
                 'Invalid configuration option (%s) in file %s\n' %
                 (name, cfg_file))
 
     except IOError:
-      sys.stderr.write(
+      _cpplint_state.PrintError(
           "Skipping config file '%s': Can't open for reading\n" % cfg_file)
       keep_looking = False
 
@@ -6063,7 +6116,7 @@ def ProcessFile(filename, vlevel, extra_check_functions=[]):
         lf_lines.append(linenum + 1)
 
   except IOError:
-    sys.stderr.write(
+    _cpplint_state.PrintError(
         "Skipping input '%s': Can't open for reading\n" % filename)
     _RestoreFilters()
     return
@@ -6075,7 +6128,7 @@ def ProcessFile(filename, vlevel, extra_check_functions=[]):
   # should rely on the extension.
   if filename != '-' and file_extension not in _valid_extensions:
     if not _Quiet():
-      sys.stderr.write('Ignoring %s; not a valid file name '
+      _cpplint_state.PrintError('Ignoring %s; not a valid file name '
                        '(%s)\n' % (filename, ', '.join(_valid_extensions)))
   else:
     ProcessFileData(filename, file_extension, lines, Error,
@@ -6161,8 +6214,9 @@ def ParseArguments(args):
     if opt == '--help':
       PrintUsage(None)
     elif opt == '--output':
-      if val not in ('emacs', 'vs7', 'eclipse'):
-        PrintUsage('The only allowed output formats are emacs, vs7 and eclipse.')
+      if val not in ('emacs', 'vs7', 'eclipse', 'junit'):
+        PrintUsage('The only allowed output formats are emacs, vs7, eclipse '
+                   'and junit.')
       output_format = val
     elif opt == '--quiet':
       quiet = True
@@ -6222,6 +6276,9 @@ def main():
   # If --quiet is passed, suppress printing error count unless there are errors.
   if not _cpplint_state.quiet or _cpplint_state.error_count > 0:
     _cpplint_state.PrintErrorCounts()
+
+  if _cpplint_state.output_format == 'junit':
+    sys.stderr.write(_cpplint_state.FormatJUnitXML())
 
   sys.exit(_cpplint_state.error_count > 0)
 
