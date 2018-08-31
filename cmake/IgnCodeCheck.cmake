@@ -60,7 +60,7 @@ function(ign_setup_target_for_codecheck)
     COMMAND ${CPPLINT_COMMAND} `${CPPCHECK_FIND}`
   )
 
-  # Setup custom commands for xml outputthe codecheck target with xml output
+  # Setup custom commands for xml output
   add_custom_command(OUTPUT ${CPPCHECK_XMLDIR}/cppcheck.xml
     COMMAND ${CPPCHECK_PATH} ${CPPCHECK_BASE} ${CPPCHECK_COMMAND_1}
             --xml --xml-version=2 &> ${CPPCHECK_XMLDIR}/cppcheck.xml)
